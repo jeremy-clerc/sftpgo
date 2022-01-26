@@ -948,7 +948,7 @@ func (s *httpdServer) sendForbiddenResponse(w http.ResponseWriter, r *http.Reque
 
 func (s *httpdServer) redirectToWebPath(w http.ResponseWriter, r *http.Request, webPath string) {
 	if dataprovider.HasAdmin() {
-		http.Redirect(w, r, webPath, http.StatusMovedPermanently)
+		http.Redirect(w, r, webPath, http.StatusFound)
 		return
 	}
 	if s.enableWebAdmin {
@@ -1205,7 +1205,7 @@ func (s *httpdServer) initializeRouter() {
 	if s.enableWebClient {
 		s.router.Get(webBaseClientPath, func(w http.ResponseWriter, r *http.Request) {
 			r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-			http.Redirect(w, r, webClientLoginPath, http.StatusMovedPermanently)
+			http.Redirect(w, r, webClientLoginPath, http.StatusFound)
 		})
 		s.router.Get(webClientLoginPath, s.handleClientWebLogin)
 		s.router.Post(webClientLoginPath, s.handleWebClientLoginPost)
