@@ -541,15 +541,21 @@ func (c *CryptFsConfig) Validate() error {
 	return nil
 }
 
+type WriterWriterAtCloser interface {
+	io.Writer
+	io.WriterAt
+	io.Closer
+}
+
 // PipeWriter defines a wrapper for pipeat.PipeWriterAt.
 type PipeWriter struct {
-	writer *pipeat.PipeWriterAt
+	writer WriterWriterAtCloser
 	err    error
 	done   chan bool
 }
 
 // NewPipeWriter initializes a new PipeWriter
-func NewPipeWriter(w *pipeat.PipeWriterAt) *PipeWriter {
+func NewPipeWriter(w WriterWriterAtCloser) *PipeWriter {
 	return &PipeWriter{
 		writer: w,
 		err:    nil,

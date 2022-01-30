@@ -225,11 +225,12 @@ func (fs *S3Fs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, fun
 
 // Create creates or opens the named file for writing
 func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
-	r, w, err := pipeat.PipeInDir(fs.localTempDir)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	p := NewPipeWriter(w)
+	bp := NewBufferedPipe(1024 * 1024 * 5)
+	// r, w, err := pipeat.PipeInDir(fs.localTempDir)
+	// if err != nil {
+	// 	return nil, nil, nil, err
+	// }
+	p := NewPipeWriter(bp)
 	ctx, cancelFn := context.WithCancel(context.Background())
 	uploader := s3manager.NewUploaderWithClient(fs.svc)
 	go func() {
@@ -244,7 +245,7 @@ func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error)
 		response, err := uploader.UploadWithContext(ctx, &s3manager.UploadInput{
 			Bucket:       aws.String(fs.config.Bucket),
 			Key:          aws.String(key),
-			Body:         r,
+			Body:         bp,
 			ACL:          util.NilIfEmpty(fs.config.ACL),
 			StorageClass: util.NilIfEmpty(fs.config.StorageClass),
 			ContentType:  util.NilIfEmpty(contentType),
@@ -252,11 +253,11 @@ func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error)
 			u.Concurrency = fs.config.UploadConcurrency
 			u.PartSize = fs.config.UploadPartSize
 		})
-		r.CloseWithError(err) //nolint:errcheck
+		bp.CloseWithError(err) //nolint:errcheck
 		p.Done(err)
 		fsLog(fs, logger.LevelDebug, "upload completed, path: %#v, acl: %#v, response: %v, readed bytes: %v, err: %+v",
-			name, fs.config.ACL, response, r.GetReadedBytes(), err)
-		metric.S3TransferCompleted(r.GetReadedBytes(), 0, err)
+			name, fs.config.ACL, response, bp.readCount, err)
+		metric.S3TransferCompleted(bp.readCount, 0, err)
 	}()
 	return nil, p, cancelFn, nil
 }
