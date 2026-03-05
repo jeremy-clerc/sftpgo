@@ -256,16 +256,6 @@ func (fs *S3Fs) Create(name string, flag, checks int) (File, PipeWriter, func(),
 			return nil, nil, nil, err
 		}
 	}
-	r, w, err := pipeat.PipeInDir(fs.localTempDir)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	var p PipeWriter
-	if checks&CheckResume != 0 {
-		p = newPipeWriterAtOffset(w, 0)
-	} else {
-		p = NewPipeWriter(w)
-	}
 	ctx, cancelFn := context.WithCancel(context.Background())
 	uploader := manager.NewUploader(fs.svc, func(u *manager.Uploader) {
 		u.Concurrency = fs.config.UploadConcurrency
@@ -278,29 +268,51 @@ func (fs *S3Fs) Create(name string, flag, checks int) (File, PipeWriter, func(),
 		}
 	})
 
-	go func() {
-		defer cancelFn()
+	contentType := mime.TypeByExtension(path.Ext(name))
+	if flag == -1 {
+		contentType = s3DirMimeType
+	}
+	startUpload := func(body io.Reader, closeBody func(error), readBytes func() int64, p PipeWriter) {
+		go func() {
+			defer cancelFn()
 
-		var contentType string
-		if flag == -1 {
-			contentType = s3DirMimeType
-		} else {
-			contentType = mime.TypeByExtension(path.Ext(name))
+			_, err := uploader.Upload(ctx, &s3.PutObjectInput{
+				Bucket:       aws.String(fs.config.Bucket),
+				Key:          aws.String(name),
+				Body:         body,
+				ACL:          types.ObjectCannedACL(fs.config.ACL),
+				StorageClass: types.StorageClass(fs.config.StorageClass),
+				ContentType:  util.NilIfEmpty(contentType),
+			})
+			closeBody(err)
+			p.Done(err)
+			fsLog(fs, logger.LevelDebug, "upload completed, path: %q, acl: %q, readed bytes: %d, err: %+v",
+				name, fs.config.ACL, readBytes(), err)
+			metric.S3TransferCompleted(readBytes(), 0, err)
+		}()
+	}
+
+	var p PipeWriter
+	if checks&CheckStreamWrite != 0 && checks&CheckResume == 0 {
+		r, w := io.Pipe()
+		p = NewStreamingPipeWriter(w)
+		startUpload(r, func(err error) {
+			r.CloseWithError(err) //nolint:errcheck
+		}, p.GetWrittenBytes, p)
+	} else {
+		r, w, err := pipeat.PipeInDir(fs.localTempDir)
+		if err != nil {
+			return nil, nil, nil, err
 		}
-		_, err := uploader.Upload(ctx, &s3.PutObjectInput{
-			Bucket:       aws.String(fs.config.Bucket),
-			Key:          aws.String(name),
-			Body:         r,
-			ACL:          types.ObjectCannedACL(fs.config.ACL),
-			StorageClass: types.StorageClass(fs.config.StorageClass),
-			ContentType:  util.NilIfEmpty(contentType),
-		})
-		r.CloseWithError(err) //nolint:errcheck
-		p.Done(err)
-		fsLog(fs, logger.LevelDebug, "upload completed, path: %q, acl: %q, readed bytes: %d, err: %+v",
-			name, fs.config.ACL, r.GetReadedBytes(), err)
-		metric.S3TransferCompleted(r.GetReadedBytes(), 0, err)
-	}()
+		if checks&CheckResume != 0 {
+			p = newPipeWriterAtOffset(w, 0)
+		} else {
+			p = NewPipeWriter(w)
+		}
+		startUpload(r, func(err error) {
+			r.CloseWithError(err) //nolint:errcheck
+		}, r.GetReadedBytes, p)
+	}
 
 	if checks&CheckResume != 0 {
 		readCh := make(chan error, 1)
@@ -313,12 +325,12 @@ func (fs *S3Fs) Create(name string, flag, checks int) (File, PipeWriter, func(),
 			readCh <- err
 		}()
 
-		err = <-readCh
-		if err != nil {
+		resumeErr := <-readCh
+		if resumeErr != nil {
 			cancelFn()
 			p.Close()
 			fsLog(fs, logger.LevelDebug, "download before resume failed, writer closed and read cancelled")
-			return nil, nil, nil, err
+			return nil, nil, nil, resumeErr
 		}
 	}
 
