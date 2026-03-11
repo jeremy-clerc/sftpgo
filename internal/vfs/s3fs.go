@@ -294,10 +294,10 @@ func (fs *S3Fs) Create(name string, flag, checks int) (File, PipeWriter, func(),
 
 	var p PipeWriter
 	if checks&CheckStreamWrite != 0 && checks&CheckResume == 0 {
-		r, w := io.Pipe()
-		p = NewStreamingPipeWriter(w)
-		startUpload(r, func(err error) {
-			r.CloseWithError(err) //nolint:errcheck
+		pipe := NewBufferedPipe(0)
+		p = NewStreamingPipeWriter(pipe)
+		startUpload(pipe, func(err error) {
+			pipe.CloseWithError(err) //nolint:errcheck
 		}, p.GetWrittenBytes, p)
 	} else {
 		r, w, err := pipeat.PipeInDir(fs.localTempDir)

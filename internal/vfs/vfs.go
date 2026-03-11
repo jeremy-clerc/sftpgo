@@ -904,18 +904,23 @@ func (p *pipeWriterAtOffset) Write(buf []byte) (int, error) {
 }
 
 type streamingPipeWriter struct {
-	writer      *io.PipeWriter
-	err         error
-	done        chan bool
-	mu          sync.Mutex
+	pipe *BufferedPipe
+	err  error
+	done chan bool
+	mu   sync.Mutex
+	// writeOffset tracks the sequential Write() cursor
 	writeOffset int64
 	written     int64
 }
 
-func NewStreamingPipeWriter(w *io.PipeWriter) PipeWriter {
+// NewStreamingPipeWriter creates a PipeWriter backed by a BufferedPipe.
+// The BufferedPipe supports WriteAt for slightly out-of-order writes (e.g.
+// SFTP clients sending multiple packets ahead) while still providing a
+// sequential reader for the upload consumer.
+func NewStreamingPipeWriter(pipe *BufferedPipe) PipeWriter {
 	return &streamingPipeWriter{
-		writer: w,
-		done:   make(chan bool),
+		pipe: pipe,
+		done: make(chan bool),
 	}
 }
 
@@ -927,18 +932,13 @@ func (w *streamingPipeWriter) Write(p []byte) (int, error) {
 }
 
 func (w *streamingPipeWriter) WriteAt(p []byte, off int64) (int, error) {
+	n, err := w.pipe.WriteAt(p, off)
+
 	w.mu.Lock()
-	if off != w.writeOffset {
-		expected := w.writeOffset
-		w.mu.Unlock()
-		return 0, fmt.Errorf("invalid write offset: %d, expected: %d", off, expected)
+	endOff := off + int64(n)
+	if endOff > w.writeOffset {
+		w.writeOffset = endOff
 	}
-	w.mu.Unlock()
-
-	n, err := w.writer.Write(p)
-
-	w.mu.Lock()
-	w.writeOffset += int64(n)
 	w.written += int64(n)
 	w.mu.Unlock()
 
@@ -946,7 +946,7 @@ func (w *streamingPipeWriter) WriteAt(p []byte, off int64) (int, error) {
 }
 
 func (w *streamingPipeWriter) Close() error {
-	w.writer.Close() //nolint:errcheck
+	w.pipe.Close() //nolint:errcheck
 	<-w.done
 	return w.err
 }
